@@ -96,12 +96,11 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
-
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
-
-import robot_lab.tasks  # noqa: F401  # isort: skip
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+
+import robot_lab.tasks  # noqa: F401  # isort: skip
 
 # import logger
 logger = logging.getLogger(__name__)

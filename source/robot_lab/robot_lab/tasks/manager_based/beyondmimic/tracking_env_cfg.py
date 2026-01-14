@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import MISSING
 
+import robot_lab.tasks.manager_based.beyondmimic.mdp as mdp
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -23,8 +25,6 @@ from isaaclab.terrains import TerrainImporterCfg
 ##
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-
-import robot_lab.tasks.manager_based.beyondmimic.mdp as mdp
 
 ##
 # Scene definition

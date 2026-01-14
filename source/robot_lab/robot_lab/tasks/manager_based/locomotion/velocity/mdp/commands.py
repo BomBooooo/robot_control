@@ -7,10 +7,10 @@ import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
+
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.utils import configclass
-
-import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from .utils import is_robot_on_terrain
 

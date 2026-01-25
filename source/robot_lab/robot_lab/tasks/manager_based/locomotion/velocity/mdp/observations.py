@@ -26,6 +26,21 @@ def joint_pos_rel_without_wheel(
     return joint_pos_rel
 
 
+def action_mask(
+    env: ManagerBasedEnv,
+    leg_dim: int = 12,
+    wheel_dim: int = 4,
+    wheel_asset_index: int = 1,
+    asset_name: str = "robot",
+) -> torch.Tensor:
+    """Per-environment action mask for leg+wheel action space."""
+    from .utils import get_action_mask
+
+    return get_action_mask(
+        env, leg_dim=leg_dim, wheel_dim=wheel_dim, wheel_asset_index=wheel_asset_index, asset_name=asset_name
+    )
+
+
 def phase(env: ManagerBasedRLEnv, cycle_time: float) -> torch.Tensor:
     if not hasattr(env, "episode_length_buf") or env.episode_length_buf is None:
         env.episode_length_buf = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)

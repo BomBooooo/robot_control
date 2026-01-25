@@ -124,3 +124,63 @@ def is_robot_on_terrain(env: ManagerBasedEnv, terrain_name: str, asset_name: str
 
     # Check if the robot's current terrain column is in the specified terrain's range
     return (col_idx >= col_start) & (col_idx < col_end)
+
+
+def get_robot_asset_indices(env: ManagerBasedEnv, asset_name: str = "robot") -> torch.Tensor:
+    """Get per-environment asset indices from a multi-asset spawn configuration."""
+    cached = getattr(env, "_robot_asset_indices", None)
+    if cached is not None and cached.shape[0] == env.num_envs:
+        return cached
+
+    asset = env.scene[asset_name]
+    spawn_cfg = getattr(asset.cfg, "spawn", None)
+    asset_indices = getattr(spawn_cfg, "asset_indices", None) if spawn_cfg is not None else None
+    if asset_indices is None:
+        raise RuntimeError("Asset indices not found on spawn configuration; expected multi-asset spawning.")
+
+    indices = torch.tensor(asset_indices, device=env.device, dtype=torch.long)
+    if indices.shape[0] != env.num_envs:
+        raise RuntimeError(
+            f"Asset indices length mismatch: {indices.shape[0]} != {env.num_envs}. "
+            "Please ensure the spawner generated indices for all environments."
+        )
+    env._robot_asset_indices = indices
+    return indices
+
+
+def get_wheel_action_mask(
+    env: ManagerBasedEnv,
+    wheel_dim: int,
+    wheel_asset_index: int = 1,
+    asset_name: str = "robot",
+) -> torch.Tensor:
+    """Get per-environment wheel action mask (1 if wheels exist, else 0)."""
+    cached = getattr(env, "_wheel_action_mask", None)
+    if cached is not None and cached.shape[0] == env.num_envs and cached.shape[1] == wheel_dim:
+        return cached
+
+    asset_indices = get_robot_asset_indices(env, asset_name=asset_name)
+    wheel_mask = (asset_indices == wheel_asset_index).float().unsqueeze(-1).repeat(1, wheel_dim)
+    env._wheel_action_mask = wheel_mask
+    return wheel_mask
+
+
+def get_action_mask(
+    env: ManagerBasedEnv,
+    leg_dim: int,
+    wheel_dim: int,
+    wheel_asset_index: int = 1,
+    asset_name: str = "robot",
+) -> torch.Tensor:
+    """Get per-environment action mask for concatenated leg+wheel action space."""
+    cached = getattr(env, "_action_mask", None)
+    if cached is not None and cached.shape[0] == env.num_envs and cached.shape[1] == (leg_dim + wheel_dim):
+        return cached
+
+    leg_mask = torch.ones((env.num_envs, leg_dim), device=env.device)
+    wheel_mask = get_wheel_action_mask(
+        env, wheel_dim=wheel_dim, wheel_asset_index=wheel_asset_index, asset_name=asset_name
+    )
+    action_mask = torch.cat([leg_mask, wheel_mask], dim=1)
+    env._action_mask = action_mask
+    return action_mask

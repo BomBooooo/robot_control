@@ -15,6 +15,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.utils.math import quat_apply_inverse, yaw_quat
 
+from .utils import get_robot_asset_indices
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -33,6 +35,13 @@ def track_lin_vel_xy_exp(
     reward = torch.exp(-lin_vel_error / std**2)
     reward *= torch.clamp(-env.scene["robot"].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
     return reward
+
+
+def _mask_reward_by_asset_index(
+    env: ManagerBasedRLEnv, reward: torch.Tensor, asset_index: int, asset_name: str = "robot"
+) -> torch.Tensor:
+    mask = (get_robot_asset_indices(env, asset_name=asset_name) == asset_index).float()
+    return reward * mask
 
 
 def track_ang_vel_z_exp(
@@ -126,6 +135,131 @@ def joint_pos_penalty(
     return reward
 
 
+def joint_torques_l2_masked(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, asset_index: int, asset_name: str | None = None
+) -> torch.Tensor:
+    reward = mdp.joint_torques_l2(env, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def joint_vel_l2_masked(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, asset_index: int, asset_name: str | None = None
+) -> torch.Tensor:
+    reward = mdp.joint_vel_l2(env, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def joint_acc_l2_masked(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, asset_index: int, asset_name: str | None = None
+) -> torch.Tensor:
+    reward = mdp.joint_acc_l2(env, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def track_lin_vel_xy_exp_masked(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    asset_index: int,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    reward = track_lin_vel_xy_exp(env, std, command_name, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_cfg.name)
+
+
+def track_ang_vel_z_exp_masked(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    asset_index: int,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    reward = track_ang_vel_z_exp(env, std, command_name, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_cfg.name)
+
+
+def lin_vel_z_l2_masked(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, asset_index: int, asset_name: str | None = None
+) -> torch.Tensor:
+    reward = lin_vel_z_l2(env, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def ang_vel_xy_l2_masked(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, asset_index: int, asset_name: str | None = None
+) -> torch.Tensor:
+    reward = ang_vel_xy_l2(env, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def base_height_l2_masked(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    sensor_cfg: SceneEntityCfg,
+    target_height: float,
+    asset_index: int,
+    asset_name: str | None = None,
+) -> torch.Tensor:
+    reward = base_height_l2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg, target_height=target_height)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def feet_air_time_masked(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    threshold: float,
+    asset_index: int,
+    asset_name: str = "robot",
+) -> torch.Tensor:
+    reward = feet_air_time(env, command_name=command_name, sensor_cfg=sensor_cfg, threshold=threshold)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name)
+
+
+def feet_air_time_variance_masked(
+    env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, asset_index: int, asset_name: str = "robot"
+) -> torch.Tensor:
+    reward = feet_air_time_variance_penalty(env, sensor_cfg=sensor_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name)
+
+
+def feet_slide_masked(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    asset_index: int,
+    asset_name: str | None = None,
+) -> torch.Tensor:
+    reward = feet_slide(env, sensor_cfg=sensor_cfg, asset_cfg=asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def feet_height_body_masked(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    tanh_mult: float,
+    target_height: float,
+    command_name: str,
+    asset_index: int,
+    asset_name: str | None = None,
+) -> torch.Tensor:
+    reward = feet_height_body(
+        env,
+        asset_cfg=asset_cfg,
+        tanh_mult=tanh_mult,
+        target_height=target_height,
+        command_name=command_name,
+    )
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
+
+
+def action_rate_l2_masked(
+    env: ManagerBasedRLEnv, asset_index: int, asset_name: str = "robot"
+) -> torch.Tensor:
+    reward = mdp.action_rate_l2(env)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name)
+
+
 def wheel_vel_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
@@ -148,6 +282,20 @@ def wheel_vel_penalty(
         standing_reward,
     )
     return reward
+
+
+def wheel_vel_penalty_masked(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    command_name: str,
+    velocity_threshold: float,
+    command_threshold: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_index: int = 1,
+    asset_name: str | None = None,
+) -> torch.Tensor:
+    reward = wheel_vel_penalty(env, sensor_cfg, command_name, velocity_threshold, command_threshold, asset_cfg)
+    return _mask_reward_by_asset_index(env, reward, asset_index, asset_name or asset_cfg.name)
 
 
 class GaitReward(ManagerTermBase):
@@ -272,6 +420,36 @@ def joint_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joint
     reward *= 1 / len(mirror_joints) if len(mirror_joints) > 0 else 0
     reward *= torch.clamp(-env.scene["robot"].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
     return reward
+
+
+class MaskedGaitReward(GaitReward):
+    """Gait reward masked by asset index."""
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        std: float,
+        command_name: str,
+        max_err: float,
+        velocity_threshold: float,
+        command_threshold: float,
+        synced_feet_pair_names,
+        asset_cfg: SceneEntityCfg,
+        sensor_cfg: SceneEntityCfg,
+        asset_index: int,
+    ) -> torch.Tensor:
+        reward = super().__call__(
+            env,
+            std,
+            command_name,
+            max_err,
+            velocity_threshold,
+            command_threshold,
+            synced_feet_pair_names,
+            asset_cfg,
+            sensor_cfg,
+        )
+        return _mask_reward_by_asset_index(env, reward, asset_index, asset_cfg.name)
 
 
 def action_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joints: list[list[str]]) -> torch.Tensor:

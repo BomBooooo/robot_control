@@ -26,7 +26,15 @@ class RslRlPpoActorCriticRWKVCfg(RslRlPpoActorCriticRecurrentCfg):
     rwkv_ffn_expand: int = 3
     rwkv_bias: bool = False
     rwkv_ln_eps: float = 1e-5
-    rwkv_chunk_size: int = 512
+    rwkv_chunk_size: int = 256
+    xlstm_head_num: int | None = None
+    xlstm_head_dim: int | None = None
+
+
+@configclass
+class RslRlPpoActorCriticXLSTMCfg(RslRlPpoActorCriticRecurrentCfg):
+    xlstm_head_num: int | None = None
+    xlstm_head_dim: int | None = None
 
 
 @configclass
@@ -167,7 +175,7 @@ class UnitreeGo2Go2WRoughPPORWKVRunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg):
         rwkv_ffn_expand=3,
         rwkv_bias=False,
         rwkv_ln_eps=1e-5,
-        rwkv_chunk_size=512,
+        rwkv_chunk_size=256,
     )
 
 

@@ -71,6 +71,9 @@ Recurrent layer sizing:
   - `rwkv_bias` (default false).
   - `rwkv_ln_eps` (default 1e-5).
   - `rwkv_chunk_size` (default 512; PPO update batch chunking to reduce peak VRAM).
+- xLSTM options (only when `rnn_type="xlstm"`):
+  - `xlstm_head_num` (default auto: 4 if divisible else 1).
+  - `xlstm_head_dim` (default auto: `rnn_hidden_dim / xlstm_head_num`).
 
 ## Play (RSL-RL)
 ```bash

@@ -384,6 +384,8 @@ class ExtendedMemory(nn.Module):
         rwkv_bias: bool = False,
         rwkv_ln_eps: float = 1e-5,
         rwkv_chunk_size: int = 512,
+        xlstm_head_num: int | None = None,
+        xlstm_head_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_state = None
@@ -404,6 +406,8 @@ class ExtendedMemory(nn.Module):
         self.rwkv_bias = rwkv_bias
         self.rwkv_ln_eps = rwkv_ln_eps
         self.rwkv_chunk_size = rwkv_chunk_size
+        self.xlstm_head_num = xlstm_head_num
+        self.xlstm_head_dim = xlstm_head_dim
 
         self.input_proj = None
         if input_size != self.hidden_dim:
@@ -475,7 +479,7 @@ class ExtendedMemory(nn.Module):
         if not self.uniform_dim:
             raise ValueError("xlstm requires uniform rnn_hidden_dim across layers.")
         try:
-            from xlstm.lstm import sLSTM
+            from xlstm.lstm import sLSTM, mLSTM
         except Exception:
             # Avoid importing xlstm.__init__ (which pulls lightning) by loading the module directly.
             import importlib.util
@@ -508,12 +512,38 @@ class ExtendedMemory(nn.Module):
             sys.modules["xlstm.lstm"] = xlstm_lstm
             spec.loader.exec_module(xlstm_lstm)
             sLSTM = getattr(xlstm_lstm, "sLSTM", None)
-            if sLSTM is None:
-                raise ImportError("xlstm.lstm does not define sLSTM.")
+            mLSTM = getattr(xlstm_lstm, "mLSTM", None)
+            if sLSTM is None or mLSTM is None:
+                raise ImportError("xlstm.lstm does not define sLSTM/mLSTM.")
 
-        self.rnn_layers = nn.ModuleList(
-            [sLSTM(self.hidden_dim, self.hidden_dim, 1) for _ in range(self.num_layers)]
-        )
+        if self.xlstm_head_num is not None:
+            head_num = int(self.xlstm_head_num)
+        else:
+            head_num = 4 if self.hidden_dim % 4 == 0 else 1
+        if self.xlstm_head_dim is not None:
+            head_dim = int(self.xlstm_head_dim)
+        else:
+            head_dim = self.hidden_dim // head_num
+        if head_num <= 0 or head_dim <= 0:
+            raise ValueError("xlstm head_num/head_dim must be positive.")
+        if head_num * head_dim != self.hidden_dim:
+            raise ValueError(
+                f"xlstm head_num*head_dim must equal rnn_hidden_dim ({head_num}*{head_dim} != {self.hidden_dim})."
+            )
+        self._xlstm_head_num = head_num
+        self._xlstm_head_dim = head_dim
+        layer_types = []
+        layers = []
+        for i in range(self.num_layers):
+            if i % 2 == 0:
+                layers.append(sLSTM(self.hidden_dim, head_dim, head_num))
+                layer_types.append("s")
+            else:
+                layers.append(mLSTM(self.hidden_dim, head_num, head_dim))
+                layer_types.append("m")
+        self._xlstm_layer_types = layer_types
+        self.rnn_layers = nn.ModuleList(layers)
+        self._xlstm_state_specs = self._xlstm_build_state_specs()
 
     def _init_rwkv(self) -> None:
         if not self.uniform_dim:
@@ -793,31 +823,72 @@ class ExtendedMemory(nn.Module):
             layer_states.append(tuple(s.to(device) for s in state))
         return self._xlstm_pack_state(layer_states)
 
+    def _xlstm_build_state_specs(self):
+        specs = []
+        max_len = 0
+        for layer_type in self._xlstm_layer_types:
+            if layer_type == "s":
+                shapes = [
+                    (self._xlstm_head_num * self._xlstm_head_dim,),
+                    (self._xlstm_head_num * self._xlstm_head_dim,),
+                    (self._xlstm_head_num * self._xlstm_head_dim,),
+                    (self._xlstm_head_num * self._xlstm_head_dim,),
+                ]
+            else:
+                shapes = [
+                    (self._xlstm_head_num, self._xlstm_head_dim, self._xlstm_head_dim),
+                    (self._xlstm_head_num, self._xlstm_head_dim),
+                    (self._xlstm_head_num,),
+                ]
+            lengths = [int(torch.tensor(shape).prod().item()) for shape in shapes]
+            total = sum(lengths)
+            max_len = max(max_len, total)
+            specs.append({"shapes": shapes, "lengths": lengths, "total": total})
+        return {"specs": specs, "max_len": max_len}
+
     def _xlstm_unpack_state(self, state_tuple):
         if state_tuple is None:
             return None
-        num_components = len(state_tuple)
+        if isinstance(state_tuple, tuple):
+            # Backward-compat: old stacked tuple format (uniform state components).
+            num_components = len(state_tuple)
+            layer_states = []
+            for layer_idx in range(self.num_layers):
+                comp = tuple(state_tuple[c][layer_idx] for c in range(num_components))
+                if len(comp) == 1:
+                    layer_states.append(comp[0])
+                else:
+                    layer_states.append(comp)
+            return layer_states
+        # New packed tensor format: [num_layers, batch, flat_dim]
+        specs = self._xlstm_state_specs["specs"]
         layer_states = []
         for layer_idx in range(self.num_layers):
-            comp = tuple(state_tuple[c][layer_idx] for c in range(num_components))
-            if len(comp) == 1:
-                layer_states.append(comp[0])
-            else:
-                layer_states.append(comp)
+            flat = state_tuple[layer_idx]
+            offset = 0
+            tensors = []
+            for shape, length in zip(specs[layer_idx]["shapes"], specs[layer_idx]["lengths"]):
+                chunk = flat[:, offset : offset + length]
+                tensors.append(chunk.view(chunk.shape[0], *shape))
+                offset += length
+            layer_states.append(tuple(tensors))
         return layer_states
 
     def _xlstm_pack_state(self, layer_states: list):
         if not layer_states:
             return None
-        first_state = layer_states[0]
-        if not isinstance(first_state, tuple):
-            first_state = (first_state,)
-            layer_states = [(s,) for s in layer_states]
-        num_components = len(first_state)
-        stacked = []
-        for comp_idx in range(num_components):
-            stacked.append(torch.stack([state[comp_idx] for state in layer_states], dim=0))
-        return tuple(stacked)
+        specs = self._xlstm_state_specs["specs"]
+        max_len = self._xlstm_state_specs["max_len"]
+        batch_size = layer_states[0][0].shape[0]
+        packed = layer_states[0][0].new_zeros((self.num_layers, batch_size, max_len))
+        for layer_idx, state in enumerate(layer_states):
+            flat_chunks = []
+            for tensor in state:
+                flat_chunks.append(tensor.reshape(batch_size, -1))
+            flat = torch.cat(flat_chunks, dim=1)
+            total = specs[layer_idx]["total"]
+            packed[layer_idx, :, :total] = flat
+        return packed
 
     def _forward_rwkv(self, input: torch.Tensor, masks: torch.Tensor | None, hidden_state):
         batch_mode = masks is not None
@@ -926,6 +997,8 @@ class ExtendedActorCriticRecurrent(nn.Module):
         rwkv_bias: bool = False,
         rwkv_ln_eps: float = 1e-5,
         rwkv_chunk_size: int = 512,
+        xlstm_head_num: int | None = None,
+        xlstm_head_dim: int | None = None,
         **kwargs,
     ) -> None:
         if "rnn_hidden_size" in kwargs:
@@ -967,6 +1040,8 @@ class ExtendedActorCriticRecurrent(nn.Module):
             rwkv_bias=rwkv_bias,
             rwkv_ln_eps=rwkv_ln_eps,
             rwkv_chunk_size=rwkv_chunk_size,
+            xlstm_head_num=xlstm_head_num,
+            xlstm_head_dim=xlstm_head_dim,
         )
         if self.state_dependent_std:
             self.actor = MLP(rnn_out_dim, [2, num_actions], actor_hidden_dims, activation)
@@ -996,6 +1071,8 @@ class ExtendedActorCriticRecurrent(nn.Module):
             rwkv_bias=rwkv_bias,
             rwkv_ln_eps=rwkv_ln_eps,
             rwkv_chunk_size=rwkv_chunk_size,
+            xlstm_head_num=xlstm_head_num,
+            xlstm_head_dim=xlstm_head_dim,
         )
         self.critic = MLP(rnn_out_dim, 1, critic_hidden_dims, activation)
         print(f"Critic RNN: {self.memory_c}")

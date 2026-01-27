@@ -102,12 +102,57 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import robot_lab.tasks  # noqa: F401  # isort: skip
+from robot_lab.rl import register_rsl_rl_extensions  # noqa: F401  # isort: skip
 
 # import logger
 logger = logging.getLogger(__name__)
 
+# small wrapper to guard action shape mismatches
+class _ActionShapeGuardWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        if hasattr(self.env.unwrapped, "action_manager"):
+            self._expected_dim = self.env.unwrapped.action_manager.total_action_dim
+        else:
+            self._expected_dim = None
+        self._warned_time_dim = False
+        self._warned_shape = False
+        self._warned_slice = False
+
+    def step(self, action):
+        if self._expected_dim is None and hasattr(self.env.unwrapped, "action_manager"):
+            self._expected_dim = self.env.unwrapped.action_manager.total_action_dim
+        if self._expected_dim is not None:
+            if action.ndim == 3 and action.shape[-1] == self._expected_dim:
+                if not self._warned_time_dim:
+                    logger.warning(
+                        "Action has time dimension %s, selecting last step.",
+                        action.shape[1],
+                    )
+                    self._warned_time_dim = True
+                action = action[:, -1, :]
+            action_dim = action.shape[-1]
+            if not self._warned_shape:
+                logger.warning("Action shape %s, expected_dim %s", tuple(action.shape), self._expected_dim)
+                self._warned_shape = True
+            if action_dim > self._expected_dim:
+                if not self._warned_slice:
+                    logger.warning(
+                        "Action dim %s > expected %s, slicing.",
+                        action_dim,
+                        self._expected_dim,
+                    )
+                    self._warned_slice = True
+                action = action[..., : self._expected_dim]
+            elif action_dim < self._expected_dim:
+                raise ValueError(
+                    f"Invalid action shape, expected: {self._expected_dim}, received: {action_dim}."
+                )
+        return self.env.step(action)
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 
+register_rsl_rl_extensions()
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
@@ -155,6 +200,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"Exact experiment name requested from command line: {log_dir}")
     if agent_cfg.run_name:
         log_dir += f"_{agent_cfg.run_name}"
+    # add model name suffix
+    try:
+        model_tag = None
+        policy_cfg = agent_cfg.policy if hasattr(agent_cfg, "policy") else None
+        if policy_cfg is not None:
+            class_name = getattr(policy_cfg, "class_name", "")
+            rnn_type = getattr(policy_cfg, "rnn_type", None)
+            if class_name == "ActorCritic":
+                model_tag = "mlp"
+            elif class_name == "ActorCriticRecurrent" and rnn_type:
+                model_tag = str(rnn_type)
+        if model_tag:
+            log_dir += f"_{model_tag}"
+    except Exception:
+        pass
     log_dir = os.path.join(log_root_path, log_dir)
 
     # set the IO descriptors export flag if requested
@@ -170,6 +230,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env = _ActionShapeGuardWrapper(env)
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):

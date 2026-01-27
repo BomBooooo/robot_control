@@ -83,12 +83,41 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import robot_lab.tasks  # noqa: F401  # isort: skip
+from robot_lab.rl import register_rsl_rl_extensions  # noqa: F401  # isort: skip
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from rl_utils import camera_follow
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
+register_rsl_rl_extensions()
+
+
+# small wrapper to guard action shape mismatches
+class _ActionShapeGuardWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        if hasattr(self.env.unwrapped, "action_manager"):
+            self._expected_dim = self.env.unwrapped.action_manager.total_action_dim
+        else:
+            self._expected_dim = None
+
+    def step(self, action):
+        if self._expected_dim is None and hasattr(self.env.unwrapped, "action_manager"):
+            self._expected_dim = self.env.unwrapped.action_manager.total_action_dim
+        if self._expected_dim is not None:
+            if action.ndim == 3 and action.shape[-1] == self._expected_dim:
+                print(f"[DEBUG] Action has time dim {action.shape[1]}, selecting last step")
+                action = action[:, -1, :]
+            action_dim = action.shape[-1]
+            print(f"[DEBUG] Action shape {tuple(action.shape)}, expected_dim {self._expected_dim}")
+            if action_dim > self._expected_dim:
+                action = action[..., : self._expected_dim]
+            elif action_dim < self._expected_dim:
+                raise ValueError(
+                    f"Invalid action shape, expected: {self._expected_dim}, received: {action_dim}."
+                )
+        return self.env.step(action)
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
@@ -156,6 +185,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env = _ActionShapeGuardWrapper(env)
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):

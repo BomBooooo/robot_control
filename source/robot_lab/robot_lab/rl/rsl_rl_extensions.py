@@ -611,6 +611,8 @@ class ExtendedMemory(nn.Module):
     def reset(self, dones: torch.Tensor | None = None, hidden_state=None) -> None:
         if dones is None:
             self.hidden_state = hidden_state
+            if self._mode == "transformer":
+                self._transformer_buffer = None
             return
         if self.hidden_state is None:
             return
@@ -909,17 +911,26 @@ class ExtendedMemory(nn.Module):
         if batch_mode:
             if hidden_state is None:
                 raise ValueError("Hidden states not passed to memory module during policy update")
+            if isinstance(hidden_state, list):
+                hidden_state = tuple(hidden_state)
             x_seq = x.transpose(0, 1)
             batch_size = x_seq.shape[0]
             chunk_size = int(self.rwkv_chunk_size)
+
+            def _slice_state(state, start, end):
+                if isinstance(state, tuple):
+                    return tuple(h[:, start:end, ...] for h in state)
+                return state[:, start:end, ...]
+
             if chunk_size <= 0 or chunk_size >= batch_size:
-                out, _ = self.rnn(x_seq, state=None, return_state=False)
+                out, _ = self.rnn(x_seq, state=hidden_state, return_state=False)
                 out = out.transpose(0, 1)
             else:
                 outputs = []
                 for start in range(0, batch_size, chunk_size):
                     end = min(start + chunk_size, batch_size)
-                    out_chunk, _ = self.rnn(x_seq[start:end], state=None, return_state=False)
+                    state_chunk = _slice_state(hidden_state, start, end)
+                    out_chunk, _ = self.rnn(x_seq[start:end], state=state_chunk, return_state=False)
                     outputs.append(out_chunk)
                 out = torch.cat(outputs, dim=0).transpose(0, 1)
             out = unpad_trajectories(out, masks)

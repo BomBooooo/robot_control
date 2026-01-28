@@ -39,7 +39,7 @@ class RslRlPpoActorCriticXLSTMCfg(RslRlPpoActorCriticRecurrentCfg):
 
 @configclass
 class UnitreeGo2Go2WRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 24
+    num_steps_per_env = 32
     max_iterations = 20000
     save_interval = 100
     experiment_name = "unitree_go2_go2w_rough"
@@ -87,8 +87,8 @@ class UnitreeGo2Go2WRoughPPORNNRunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
         rnn_type="rnn",
-        rnn_hidden_dim=[512, 512],
-        rnn_num_layers=2,
+        rnn_hidden_dim=[640],
+        rnn_num_layers=1,
     )
 
 
@@ -103,8 +103,8 @@ class UnitreeGo2Go2WRoughPPOGRURunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
         rnn_type="gru",
-        rnn_hidden_dim=[320, 320],
-        rnn_num_layers=2,
+        rnn_hidden_dim=[416],
+        rnn_num_layers=1,
     )
 
 
@@ -119,8 +119,8 @@ class UnitreeGo2Go2WRoughPPOLSTMRunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
         rnn_type="lstm",
-        rnn_hidden_dim=[256, 256],
-        rnn_num_layers=2,
+        rnn_hidden_dim=[384],
+        rnn_num_layers=1,
     )
 
 
@@ -135,8 +135,8 @@ class UnitreeGo2Go2WRoughPPOMambaRunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
         rnn_type="mamba",
-        rnn_hidden_dim=[256, 256],
-        rnn_num_layers=2,
+        rnn_hidden_dim=[384],
+        rnn_num_layers=1,
     )
 
 
@@ -151,8 +151,8 @@ class UnitreeGo2Go2WRoughPPOXLSTMRunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
         rnn_type="xlstm",
-        rnn_hidden_dim=[192, 192],
-        rnn_num_layers=2,
+        rnn_hidden_dim=[384],
+        rnn_num_layers=1,
     )
 
 
@@ -167,8 +167,8 @@ class UnitreeGo2Go2WRoughPPORWKVRunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
         rnn_type="rwkv",
-        rnn_hidden_dim=[192, 192],
-        rnn_num_layers=2,
+        rnn_hidden_dim=[384],
+        rnn_num_layers=1,
         rwkv_head_size=32,
         rwkv_time_mix_extra_dim=32,
         rwkv_time_decay_extra_dim=64,
@@ -190,8 +190,8 @@ class UnitreeGo2Go2WRoughPPOTransformerRunnerCfg(UnitreeGo2Go2WRoughPPORunnerCfg
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
         rnn_type="transformer",
-        rnn_hidden_dim=[112, 112],
-        rnn_num_layers=2,
+        rnn_hidden_dim=[160],
+        rnn_num_layers=1,
         transformer_nhead=4,
         transformer_context_len=32,
         transformer_dropout=0.1,

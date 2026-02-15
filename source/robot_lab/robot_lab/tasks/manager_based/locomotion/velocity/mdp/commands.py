@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from isaaclab.managers import CommandTerm, CommandTermCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.markers.config import RAY_CASTER_MARKER_CFG
+from isaaclab.sensors import RayCaster
 from isaaclab.utils import configclass
 
 from .utils import is_robot_on_terrain
@@ -89,6 +92,83 @@ class UniformThresholdVelocityCommandCfg(mdp.UniformVelocityCommandCfg):
     """Configuration for the uniform threshold velocity command generator."""
 
     class_type: type = UniformThresholdVelocityCommand
+
+
+class UniformPose2dWithElevationDebugCommand(mdp.UniformPose2dCommand):
+    """2D pose command with extra debug visualization for elevation-map hit points."""
+
+    cfg: "UniformPose2dWithElevationDebugCommandCfg"
+
+    def __init__(self, cfg: "UniformPose2dWithElevationDebugCommandCfg", env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._elevation_sensor: RayCaster = env.scene.sensors[cfg.elevation_sensor_name]
+        self._elevation_ray_ids: torch.Tensor | None = None
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        # Keep default goal-pose marker behavior.
+        super()._set_debug_vis_impl(debug_vis)
+        # Add marker for elevation map points.
+        if debug_vis:
+            if not hasattr(self, "elevation_map_visualizer"):
+                self.elevation_map_visualizer = VisualizationMarkers(self.cfg.elevation_map_visualizer_cfg)
+            self.elevation_map_visualizer.set_visibility(True)
+        else:
+            if hasattr(self, "elevation_map_visualizer"):
+                self.elevation_map_visualizer.set_visibility(False)
+
+    def _debug_vis_callback(self, event):
+        # Keep default goal-pose debug visualization.
+        super()._debug_vis_callback(event)
+
+        if not hasattr(self, "elevation_map_visualizer"):
+            return
+
+        ray_ids = self._get_elevation_ray_ids()
+        max_envs = self.cfg.elevation_vis_max_envs if self.cfg.elevation_vis_max_envs > 0 else self.num_envs
+        num_vis_envs = min(self.num_envs, max_envs)
+
+        hit_points = self._elevation_sensor.data.ray_hits_w[:num_vis_envs, ray_ids, :].reshape(-1, 3)
+        valid_mask = torch.isfinite(hit_points).all(dim=1)
+        hit_points = hit_points[valid_mask]
+
+        if hit_points.numel() > 0 and self.cfg.elevation_vis_z_offset != 0.0:
+            hit_points = hit_points.clone()
+            hit_points[:, 2] += self.cfg.elevation_vis_z_offset
+
+        self.elevation_map_visualizer.visualize(translations=hit_points)
+
+    def _get_elevation_ray_ids(self) -> torch.Tensor:
+        if self._elevation_ray_ids is None:
+            ray_starts, _ = self._elevation_sensor.cfg.pattern_cfg.func(self._elevation_sensor.cfg.pattern_cfg, self.device)
+            ray_xy = ray_starts[:, :2] + torch.tensor(self._elevation_sensor.cfg.offset.pos[:2], device=self.device)
+            front_half = ray_xy[:, 0] >= -1.0e-6
+            in_range = torch.linalg.norm(ray_xy, dim=1) <= (self.cfg.elevation_max_distance + 1.0e-6)
+            self._elevation_ray_ids = torch.where(front_half & in_range)[0]
+        return self._elevation_ray_ids
+
+
+@configclass
+class UniformPose2dWithElevationDebugCommandCfg(mdp.UniformPose2dCommandCfg):
+    """Configuration for 2D pose command with elevation-map debug points."""
+
+    class_type: type = UniformPose2dWithElevationDebugCommand
+
+    elevation_sensor_name: str = "height_scanner"
+    """Ray-caster sensor used by elevation-map observation."""
+
+    elevation_max_distance: float = 5.0
+    """Maximum distance used to select front elevation points (meters)."""
+
+    elevation_vis_max_envs: int = 1
+    """Maximum number of environments to visualize at once. <=0 means all."""
+
+    elevation_vis_z_offset: float = 0.02
+    """Small Z offset to avoid z-fighting with terrain."""
+
+    elevation_map_visualizer_cfg: VisualizationMarkersCfg = RAY_CASTER_MARKER_CFG.replace(
+        prim_path="/Visuals/Command/elevation_map"
+    )
+    elevation_map_visualizer_cfg.markers["hit"].radius = 0.025
 
 
 class DiscreteCommandController(CommandTerm):

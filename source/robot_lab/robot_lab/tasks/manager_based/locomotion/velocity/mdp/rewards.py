@@ -57,6 +57,254 @@ def track_ang_vel_z_exp(
     return reward
 
 
+def position_command_error_tanh(env: ManagerBasedRLEnv, std: float, command_name: str) -> torch.Tensor:
+    """Reward position tracking with tanh kernel from pose command xyz."""
+    command = env.command_manager.get_command(command_name)
+    des_pos_b = command[:, :3]
+    distance = torch.norm(des_pos_b, dim=1)
+    reward = 1 - torch.tanh(distance / std)
+    reward *= torch.clamp(-env.scene["robot"].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
+def heading_command_error_abs(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Penalize absolute heading tracking error from pose command."""
+    command = env.command_manager.get_command(command_name)
+    heading_b = command[:, 3]
+    return heading_b.abs()
+
+
+def _gravity_alignment_scale(env: ManagerBasedRLEnv, asset_name: str = "robot") -> torch.Tensor:
+    """Compute gravity alignment scale in [0, 1] to down-weight rewards when fallen."""
+    return torch.clamp(-env.scene[asset_name].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
+
+
+def _goal_distance_and_progress(env: ManagerBasedRLEnv, command_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return current goal distance and per-step progress (previous - current distance)."""
+    current_distance = torch.linalg.norm(env.command_manager.get_command(command_name)[:, :3], dim=1)
+    current_step = int(getattr(env, "common_step_counter", 0))
+    prev_attr = f"_goal_prev_distance_{command_name}"
+    step_attr = f"_goal_progress_step_{command_name}"
+    cache_attr = f"_goal_progress_cache_{command_name}"
+
+    prev_distance = getattr(env, prev_attr, None)
+    if prev_distance is None or prev_distance.shape != current_distance.shape:
+        prev_distance = current_distance.clone()
+        setattr(env, prev_attr, prev_distance)
+        setattr(env, step_attr, current_step)
+        zero_progress = torch.zeros_like(current_distance)
+        setattr(env, cache_attr, zero_progress)
+        return current_distance, zero_progress
+
+    progress_cache = getattr(env, cache_attr, torch.zeros_like(current_distance))
+    last_step = int(getattr(env, step_attr, -1))
+    if current_step != last_step:
+        episode_length_buf = getattr(env, "episode_length_buf", None)
+        if episode_length_buf is not None:
+            reset_env_ids = torch.where(episode_length_buf == 0)[0]
+            if len(reset_env_ids) > 0:
+                prev_distance[reset_env_ids] = current_distance[reset_env_ids]
+        progress_cache = prev_distance - current_distance
+        prev_distance.copy_(current_distance)
+        setattr(env, cache_attr, progress_cache)
+        setattr(env, step_attr, current_step)
+
+    return current_distance, progress_cache
+
+
+def step_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Constant per-step term used as a time penalty."""
+    return torch.ones(env.num_envs, device=env.device)
+
+
+def goal_progress_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    reward_scale: float = 1.0,
+    clip_value: float = 1.0,
+) -> torch.Tensor:
+    """Reward positive progress towards the goal each step."""
+    _, progress = _goal_distance_and_progress(env, command_name)
+    reward = torch.clamp(progress * reward_scale, min=-clip_value, max=clip_value)
+    reward *= _gravity_alignment_scale(env)
+    return reward
+
+
+def goal_reached_bonus(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    distance_threshold: float = 0.35,
+    bonus: float = 1.0,
+) -> torch.Tensor:
+    """Sparse bonus when reaching the goal radius."""
+    distance, _ = _goal_distance_and_progress(env, command_name)
+    return (distance < distance_threshold).float() * bonus
+
+
+def velocity_towards_goal(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    min_goal_distance: float = 0.35,
+) -> torch.Tensor:
+    """Reward velocity component aligned with the goal direction in body frame."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    goal_vec_b = env.command_manager.get_command(command_name)[:, :2]
+    goal_dist = torch.linalg.norm(goal_vec_b, dim=1)
+    goal_dir = goal_vec_b / torch.clamp(goal_dist.unsqueeze(1), min=1.0e-6)
+    vel_xy_b = asset.data.root_lin_vel_b[:, :2]
+    vel_towards_goal = torch.sum(vel_xy_b * goal_dir, dim=1)
+    reward = torch.clamp(vel_towards_goal, min=0.0)
+    reward *= (goal_dist > min_goal_distance).float()
+    reward *= _gravity_alignment_scale(env)
+    return reward
+
+
+def stuck_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    window_s: float = 2.5,
+    move_threshold: float = 0.2,
+    progress_threshold: float = 0.1,
+    min_goal_distance: float = 0.75,
+) -> torch.Tensor:
+    """Penalize being stuck: little motion and little progress over a time window."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    distance, _ = _goal_distance_and_progress(env, command_name)
+    current_step = int(getattr(env, "common_step_counter", 0))
+    window_steps = max(int(round(window_s / env.step_dt)), 2)
+
+    pos_hist_attr = f"_stuck_pos_hist_rew_{command_name}_{asset_cfg.name}_{window_steps}"
+    dist_hist_attr = f"_stuck_dist_hist_rew_{command_name}_{asset_cfg.name}_{window_steps}"
+    step_attr = f"_stuck_hist_step_rew_{command_name}_{asset_cfg.name}_{window_steps}"
+    cache_attr = f"_stuck_cache_rew_{command_name}_{asset_cfg.name}_{window_steps}"
+
+    pos_hist = getattr(env, pos_hist_attr, None)
+    dist_hist = getattr(env, dist_hist_attr, None)
+    if (
+        pos_hist is None
+        or dist_hist is None
+        or pos_hist.shape != (env.num_envs, window_steps, 3)
+        or dist_hist.shape != (env.num_envs, window_steps)
+    ):
+        pos_hist = asset.data.root_pos_w.unsqueeze(1).repeat(1, window_steps, 1)
+        dist_hist = distance.unsqueeze(1).repeat(1, window_steps)
+        setattr(env, pos_hist_attr, pos_hist)
+        setattr(env, dist_hist_attr, dist_hist)
+        setattr(env, step_attr, current_step)
+        zero_penalty = torch.zeros(env.num_envs, device=env.device)
+        setattr(env, cache_attr, zero_penalty)
+        return zero_penalty
+
+    stuck_cache = getattr(env, cache_attr, torch.zeros(env.num_envs, device=env.device))
+    last_step = int(getattr(env, step_attr, -1))
+    if current_step != last_step:
+        episode_length_buf = getattr(env, "episode_length_buf", None)
+        if episode_length_buf is not None:
+            reset_env_ids = torch.where(episode_length_buf == 0)[0]
+            if len(reset_env_ids) > 0:
+                pos_hist[reset_env_ids] = asset.data.root_pos_w[reset_env_ids].unsqueeze(1).repeat(1, window_steps, 1)
+                dist_hist[reset_env_ids] = distance[reset_env_ids].unsqueeze(1).repeat(1, window_steps)
+
+        pos_hist = torch.roll(pos_hist, shifts=-1, dims=1)
+        dist_hist = torch.roll(dist_hist, shifts=-1, dims=1)
+        pos_hist[:, -1] = asset.data.root_pos_w
+        dist_hist[:, -1] = distance
+        setattr(env, pos_hist_attr, pos_hist)
+        setattr(env, dist_hist_attr, dist_hist)
+
+        move_distance = torch.linalg.norm(pos_hist[:, -1, :2] - pos_hist[:, 0, :2], dim=1)
+        progress = dist_hist[:, 0] - dist_hist[:, -1]
+        stuck_cache = (
+            (move_distance < move_threshold) & (progress < progress_threshold) & (dist_hist[:, -1] > min_goal_distance)
+        ).float()
+        setattr(env, cache_attr, stuck_cache)
+        setattr(env, step_attr, current_step)
+
+    return stuck_cache
+
+
+def terrain_risk_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("height_scanner"),
+    max_distance: float = 2.0,
+    safe_height: float = 0.12,
+    roughness_threshold: float = 0.15,
+    roughness_scale: float = 1.0,
+    offset: float = 0.5,
+) -> torch.Tensor:
+    """Penalize risky terrain ahead using elevation magnitude and roughness."""
+    sensor: RayCaster = env.scene.sensors[sensor_cfg.name]
+    heights = sensor.data.pos_w[:, 2].unsqueeze(1) - sensor.data.ray_hits_w[..., 2] - offset
+
+    ray_ids_attr = f"_terrain_risk_ray_ids_{sensor_cfg.name}_{int(max_distance * 1000)}"
+    ray_ids = getattr(env, ray_ids_attr, None)
+    if ray_ids is None:
+        ray_starts, _ = sensor.cfg.pattern_cfg.func(sensor.cfg.pattern_cfg, env.device)
+        ray_xy = ray_starts[:, :2] + torch.tensor(sensor.cfg.offset.pos[:2], device=env.device)
+        front_half = ray_xy[:, 0] >= -1.0e-6
+        in_range = torch.linalg.norm(ray_xy, dim=1) <= (max_distance + 1.0e-6)
+        ray_ids = torch.where(front_half & in_range)[0]
+        setattr(env, ray_ids_attr, ray_ids)
+
+    front_heights = heights[:, ray_ids]
+    height_risk = torch.relu(torch.abs(front_heights) - safe_height).mean(dim=1)
+    roughness = torch.std(front_heights, dim=1)
+    roughness_risk = torch.relu(roughness - roughness_threshold) * roughness_scale
+    return height_risk + roughness_risk
+
+
+def heading_oscillation_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    window_s: float = 1.5,
+    min_goal_distance: float = 0.5,
+    heading_error_threshold: float = 0.1,
+) -> torch.Tensor:
+    """Penalize frequent heading-error direction flips within a short window."""
+    distance, _ = _goal_distance_and_progress(env, command_name)
+    heading_error = env.command_manager.get_command(command_name)[:, 3]
+    current_step = int(getattr(env, "common_step_counter", 0))
+    window_steps = max(int(round(window_s / env.step_dt)), 3)
+
+    hist_attr = f"_heading_err_hist_rew_{command_name}_{window_steps}"
+    step_attr = f"_heading_err_hist_step_rew_{command_name}_{window_steps}"
+    cache_attr = f"_heading_osc_cache_rew_{command_name}_{window_steps}"
+
+    heading_hist = getattr(env, hist_attr, None)
+    if heading_hist is None or heading_hist.shape != (env.num_envs, window_steps):
+        heading_hist = heading_error.unsqueeze(1).repeat(1, window_steps)
+        setattr(env, hist_attr, heading_hist)
+        setattr(env, step_attr, current_step)
+        zero_penalty = torch.zeros(env.num_envs, device=env.device)
+        setattr(env, cache_attr, zero_penalty)
+        return zero_penalty
+
+    osc_cache = getattr(env, cache_attr, torch.zeros(env.num_envs, device=env.device))
+    last_step = int(getattr(env, step_attr, -1))
+    if current_step != last_step:
+        episode_length_buf = getattr(env, "episode_length_buf", None)
+        if episode_length_buf is not None:
+            reset_env_ids = torch.where(episode_length_buf == 0)[0]
+            if len(reset_env_ids) > 0:
+                heading_hist[reset_env_ids] = heading_error[reset_env_ids].unsqueeze(1).repeat(1, window_steps)
+
+        heading_hist = torch.roll(heading_hist, shifts=-1, dims=1)
+        heading_hist[:, -1] = heading_error
+        setattr(env, hist_attr, heading_hist)
+
+        heading_delta = heading_hist[:, 1:] - heading_hist[:, :-1]
+        sign_change = (heading_delta[:, 1:] * heading_delta[:, :-1] < 0.0).float().sum(dim=1)
+        osc_score = sign_change / max(window_steps - 2, 1)
+        active_mask = (distance > min_goal_distance) & (torch.abs(heading_error) > heading_error_threshold)
+        osc_cache = osc_score * active_mask.float()
+        setattr(env, cache_attr, osc_cache)
+        setattr(env, step_attr, current_step)
+
+    return osc_cache
+
+
 def track_lin_vel_xy_yaw_frame_exp(
     env, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
